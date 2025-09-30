@@ -33,7 +33,7 @@ import getpass
 from datetime import datetime
 
 APP_TITLE = "Explorador SSH/SFTP para Dolphin"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 def which(cmd):
     return shutil.which(cmd) is not None
@@ -280,8 +280,9 @@ class App:
         self.include_avahi = BooleanVar(value=True)
         self.include_nmap = BooleanVar(value=True)
 
+        self.ALL_NETWORKS_OPTION = "Todas las redes"
         self.available_subnets = get_available_subnets()
-        self.subnet = StringVar(value=self.available_subnets[0] if self.available_subnets else "192.168.1.0/24")
+        self.subnet = StringVar(value=self.ALL_NETWORKS_OPTION)
         self.status_text = StringVar(value="Listo.")
         self.host_map = {}  # Para mapear IDs de Treeview a objetos HostEntry
         self.backend = ScannerBackend(self)
@@ -319,8 +320,8 @@ class App:
 
         ttk.Label(cfg, text="Subred (IPv4):").grid(row=0, column=6, sticky=E, padx=4, pady=4)
         self.subnet_combo = ttk.Combobox(cfg, textvariable=self.subnet, width=16)
-        if self.available_subnets:
-            self.subnet_combo['values'] = self.available_subnets
+        self.subnet_combo['values'] = [self.ALL_NETWORKS_OPTION] + self.available_subnets
+        self.subnet_combo.state(['readonly'])
         self.subnet_combo.grid(row=0, column=7, sticky=W, padx=4, pady=4)
 
 
@@ -513,22 +514,30 @@ class App:
                     results_dict[key] = h
 
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                # NOTA: Nmap y Avahi se ejecutan en paralelo.
-                # Si se seleccionan múltiples subredes para Nmap, se podrían paralelizar también,
-                # pero por ahora se escanea una subred a la vez para no saturar.
+            subnets_to_scan = []
+            selected_subnet = self.subnet.get().strip()
+
+            if self.include_nmap.get():
+                if selected_subnet == self.ALL_NETWORKS_OPTION:
+                    subnets_to_scan = self.available_subnets
+                    self.append_status(f"Iniciando escaneo Nmap en {len(subnets_to_scan)} subred(es)...")
+                elif selected_subnet:
+                    subnets_to_scan = [selected_subnet]
+
+            num_nmap_tasks = len(subnets_to_scan)
+            num_avahi_tasks = 1 if self.include_avahi.get() else 0
+            max_workers = num_nmap_tasks + num_avahi_tasks if (num_nmap_tasks + num_avahi_tasks > 0) else 1
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = []
-                if self.include_nmap.get():
-                    subnet = self.subnet.get().strip()
-                    if subnet:
-                        try:
-                            ipaddress.ip_network(subnet, strict=False)
-                            futures.append(executor.submit(self.backend.run_nmap, subnet))
-                        except ValueError:
-                            self.append_status(f"Subred '{subnet}' inválida. Use formato CIDR (ej: 192.168.1.0/24).")
+                for subnet in subnets_to_scan:
+                    futures.append(executor.submit(self.backend.run_nmap, subnet))
 
                 if self.include_avahi.get():
                     futures.append(executor.submit(self.backend.run_avahi))
+
+                if not futures:
+                    self.append_status("Nada que escanear. Habilita Nmap o Avahi.")
 
                 for future in concurrent.futures.as_completed(futures):
                     if self.backend.stop_flag.is_set():
@@ -627,7 +636,7 @@ class App:
 
 def main():
     root = Tk()
-    app = App(root)
+    App(root)
     root.geometry("918x520")
     root.minsize(820, 420)
     root.mainloop()
