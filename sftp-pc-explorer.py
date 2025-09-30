@@ -567,7 +567,8 @@ class App:
             item_id = self.tree.insert("", END, values=(h.hostname or "-", h.address or "-", h.port, h.source))
             self.host_map[item_id] = h
 
-    def _get_selected(self):
+    def _get_selected_host_entry(self):
+        """Obtiene el HostEntry seleccionado en el Treeview. Muestra una advertencia si no hay selección."""
         sel = self.tree.selection()
         if not sel:
             messagebox.showwarning("Atención", "Selecciona un host de la lista.")
@@ -576,7 +577,7 @@ class App:
         return self.host_map.get(item_id)
 
     def on_open_dolphin(self):
-        host_entry = self._get_selected()
+        host_entry = self._get_selected_host_entry()
         if not host_entry:
             return
 
@@ -596,7 +597,7 @@ class App:
             self.append_status(f"Abriendo en Dolphin: {url}")
 
     def on_copy_url(self):
-        host_entry = self._get_selected()
+        host_entry = self._get_selected_host_entry()
         if not host_entry:
             return
 
@@ -611,7 +612,7 @@ class App:
         self.append_status("URL SFTP copiada al portapapeles.")
 
     def on_open_ssh(self):
-        host_entry = self._get_selected()
+        host_entry = self._get_selected_host_entry()
         if not host_entry:
             return
 
