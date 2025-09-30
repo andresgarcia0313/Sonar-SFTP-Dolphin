@@ -564,7 +564,7 @@ class App:
 def main():
     root = Tk()
     app = App(root)
-    root.geometry("980x520")
+    root.geometry("918x520")
     root.minsize(820, 420)
     root.mainloop()
 
