@@ -15,6 +15,7 @@ Requisitos recomendados:
   - Dolphin (KDE) para abrir SFTP
 """
 import threading
+import concurrent.futures
 import xml.etree.ElementTree as ET
 from tkinter import Tk, StringVar, BooleanVar, N, S, E, W, END, messagebox, Menu
 from tkinter import ttk
@@ -26,7 +27,7 @@ import getpass
 from datetime import datetime
 
 APP_TITLE = "Explorador SSH/SFTP para Dolphin"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 def which(cmd):
     return shutil.which(cmd) is not None
@@ -307,6 +308,10 @@ class App:
         self.btn_stop = ttk.Button(disc, text="⏹️ Detener", command=self.on_stop, state="disabled")
         self.btn_stop.grid(row=0, column=3, sticky=E, padx=4, pady=4)
 
+        self.progress_bar = ttk.Progressbar(disc, orient="horizontal", mode="indeterminate")
+        self.progress_bar.grid(row=1, column=0, columnspan=4, sticky=(E, W), pady=(5, 0))
+
+
         # Tabla de resultados
         table_frame = ttk.LabelFrame(container, text="Hosts disponibles (SSH/SFTP)", padding=10)
         table_frame.grid(row=2, column=0, sticky=(N, S, E, W), pady=(6, 0))
@@ -372,6 +377,9 @@ class App:
         # Al cerrar
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+        # Iniciar exploración al arrancar
+        self.root.after(200, self.on_scan)
+
     def _build_menubar(self):
         menubar = Menu(self.root)
         menu_arch = Menu(menubar, tearoff=0)
@@ -429,6 +437,7 @@ class App:
                 return
             self.btn_scan.config(state="disabled")
             self.btn_stop.config(state="normal")
+            self.progress_bar.start()
             self.append_status("Explorando hosts...")
             # Limpia tabla
             for i in self.tree.get_children():
@@ -443,48 +452,59 @@ class App:
 
     def on_stop(self):
         self.backend.stop()
-        self.append_status("Cancelando exploración...")
+        if self.scan_thread and self.scan_thread.is_alive():
+            # No se puede forzar la detención de los subprocesos, pero evitamos que procesen más.
+            self.append_status("Enviando señal de detención...")
+        else:
+            self.append_status("Exploración detenida.")
+            self.btn_scan.config(state="normal")
+            self.btn_stop.config(state="disabled")
+            self.progress_bar.stop()
 
     def _scan_thread(self):
         results_dict = {}
-        count_added = 0
+
+        def add_results(hosts):
+            for h in hosts:
+                if self.backend.stop_flag.is_set():
+                    break
+                key = h.key
+                if key not in results_dict:
+                    results_dict[key] = h
 
         try:
-            if self.include_nmap.get():
-                subnet = self.subnet.get().strip()
-                # Validar subred
-                try:
-                    ipaddress.ip_network(subnet, strict=False)
-                except ValueError:
-                    self.append_status("Subred inválida. Ejemplo: 192.168.1.0/24")
-                else:
-                    nmap_hosts = self.backend.run_nmap(subnet)
-                    for h in nmap_hosts:
-                        if self.backend.stop_flag.is_set():
-                            break
-                        key = h.key
-                        if key not in results_dict:
-                            results_dict[key] = h
-                            count_added += 1
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                futures = []
+                if self.include_nmap.get():
+                    subnet = self.subnet.get().strip()
+                    try:
+                        ipaddress.ip_network(subnet, strict=False)
+                        futures.append(executor.submit(self.backend.run_nmap, subnet))
+                    except ValueError:
+                        self.append_status("Subred inválida. Ejemplo: 192.168.1.0/24")
 
-            if self.include_avahi.get() and not self.backend.stop_flag.is_set():
-                avahi_hosts = self.backend.run_avahi()
-                for h in avahi_hosts:
+                if self.include_avahi.get():
+                    futures.append(executor.submit(self.backend.run_avahi))
+
+                for future in concurrent.futures.as_completed(futures):
                     if self.backend.stop_flag.is_set():
+                        # Cancela futuros que no han empezado
+                        for f in futures:
+                            f.cancel()
                         break
-                    key = h.key
-                    if key not in results_dict:
-                        results_dict[key] = h
-                        count_added += 1
+                    try:
+                        hosts_found = future.result()
+                        add_results(hosts_found)
+                    except Exception as e:
+                        self.append_status(f"Error en una tarea de escaneo: {e}")
 
-            # volcar en la UI
             if not self.backend.stop_flag.is_set():
                 self.root.after(0, self._populate_table, list(results_dict.values()))
                 self.append_status(f"Listo. {len(results_dict)} host(s) disponibles.")
             else:
-                self.append_status("Exploración detenida.")
+                self.append_status("Exploración detenida por el usuario.")
         finally:
-            self.root.after(0, lambda: (self.btn_scan.config(state="normal"), self.btn_stop.config(state="disabled")))
+            self.root.after(0, lambda: (self.btn_scan.config(state="normal"), self.btn_stop.config(state="disabled"), self.progress_bar.stop()))
 
     def _populate_table(self, hosts):
         # Orden: por hostname/address
@@ -508,7 +528,7 @@ class App:
             return
 
         user = self.username.get().strip()
-        host = host_entry.address or host_entry.hostname
+        host = host_entry.hostname or host_entry.address
         port = host_entry.port
         path = self.path.get().strip()
         url = build_sftp_url(user, host, port, path)
@@ -528,7 +548,7 @@ class App:
             return
 
         user = self.username.get().strip()
-        host = host_entry.address or host_entry.hostname
+        host = host_entry.hostname or host_entry.address
         port = host_entry.port
         path = self.path.get().strip()
         url = build_sftp_url(user, host, port, path)
@@ -543,7 +563,7 @@ class App:
             return
 
         user = self.username.get().strip()
-        host = host_entry.address or host_entry.hostname
+        host = host_entry.hostname or host_entry.address
         port = host_entry.port
         if not host:
             messagebox.showerror("Error", "No se pudo determinar el host/IP.")
