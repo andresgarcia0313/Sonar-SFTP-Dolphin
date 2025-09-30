@@ -13,12 +13,18 @@ Requisitos recomendados:
   - nmap (para escaneo opcional)
   - avahi-daemon y avahi-utils (para descubrimiento mDNS)
   - Dolphin (KDE) para abrir SFTP
+  - python3-netifaces (para detección de subredes)
 """
 import threading
 import concurrent.futures
 import xml.etree.ElementTree as ET
 from tkinter import Tk, StringVar, BooleanVar, N, S, E, W, END, messagebox, Menu
 from tkinter import ttk
+try:
+    import netifaces
+    NETIFACES_AVAILABLE = True
+except ImportError:
+    NETIFACES_AVAILABLE = False
 import subprocess
 import shutil
 import ipaddress
@@ -27,27 +33,43 @@ import getpass
 from datetime import datetime
 
 APP_TITLE = "Explorador SSH/SFTP para Dolphin"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 def which(cmd):
     return shutil.which(cmd) is not None
 
-def guess_default_subnet():
-    # Intenta obtener una subred /24 a partir de la IP local
-    # Método más robusto: conectar a un host externo para determinar la IP local
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            # No es necesario que el host sea alcanzable
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            ip_obj = ipaddress.ip_address(ip)
-            if not ip_obj.is_loopback:
-                net = ipaddress.ip_network(f"{ip}/24", strict=False)
-                return str(net)
-    except Exception: # noqa
-        pass
-    # fallback común
-    return "192.168.1.0/24"
+def get_available_subnets():
+    """
+    Detecta todas las subredes IPv4 /24 activas usando netifaces.
+    Si no está disponible, recurre a un método de fallback.
+    """
+    subnets = set()
+    if NETIFACES_AVAILABLE:
+        try:
+            for iface in netifaces.interfaces():
+                addrs = netifaces.ifaddresses(iface)
+                if netifaces.AF_INET in addrs:
+                    for addr_info in addrs[netifaces.AF_INET]:
+                        ip = addr_info.get('addr')
+                        if ip and not ipaddress.ip_address(ip).is_loopback:
+                            # Asumimos /24, común en redes domésticas/oficina
+                            subnet = ipaddress.ip_network(f"{ip}/24", strict=False)
+                            subnets.add(str(subnet))
+        except Exception as e:
+            print(f"Error detectando subredes con netifaces: {e}")
+
+    # Fallback si netifaces falla o no está instalado
+    if not subnets:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+                if not ipaddress.ip_address(ip).is_loopback:
+                    subnets.add(str(ipaddress.ip_network(f"{ip}/24", strict=False)))
+        except Exception:
+            subnets.add("192.168.1.0/24") # Último recurso
+
+    return sorted(list(subnets))
 
 def build_sftp_url(user, host, port, path):
     host_brackets = f"[{host}]" if ":" in host else host  # IPv6 en URL
@@ -137,7 +159,16 @@ class ScannerBackend:
             self.ui.append_status("Nmap no está instalado o no se encuentra en PATH.")
             return []
         self.ui.append_status(f"Ejecutando nmap en {subnet}...")
-        cmd = ["nmap", "-oX", "-", "-p", "22", "--open", subnet]
+        # -T4: Plantilla de tiempo agresiva, más rápida en LAN.
+        # -n: No hacer resolución DNS inversa (acelera mucho).
+        # --min-hostgroup 256: Escanear más hosts en paralelo.
+        cmd = ["nmap",
+               "-T4",
+               "-n",
+               "--min-hostgroup", "256",
+               "-oX", "-",
+               "-p", "22", "--open",
+               subnet]
         try:
             out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True, timeout=120)
         except subprocess.CalledProcessError as e:
@@ -246,10 +277,11 @@ class App:
         self.username = StringVar(value=getpass.getuser())
         self.port = StringVar(value="22")
         self.path = StringVar(value="/")
-        self.subnet = StringVar(value=guess_default_subnet())
         self.include_avahi = BooleanVar(value=True)
         self.include_nmap = BooleanVar(value=True)
 
+        self.available_subnets = get_available_subnets()
+        self.subnet = StringVar(value=self.available_subnets[0] if self.available_subnets else "192.168.1.0/24")
         self.status_text = StringVar(value="Listo.")
         self.host_map = {}  # Para mapear IDs de Treeview a objetos HostEntry
         self.backend = ScannerBackend(self)
@@ -286,7 +318,11 @@ class App:
         ttk.Entry(cfg, textvariable=self.path, width=18).grid(row=0, column=5, sticky=W, padx=4, pady=4)
 
         ttk.Label(cfg, text="Subred (IPv4):").grid(row=0, column=6, sticky=E, padx=4, pady=4)
-        ttk.Entry(cfg, textvariable=self.subnet, width=18).grid(row=0, column=7, sticky=W, padx=4, pady=4)
+        self.subnet_combo = ttk.Combobox(cfg, textvariable=self.subnet, width=16)
+        if self.available_subnets:
+            self.subnet_combo['values'] = self.available_subnets
+        self.subnet_combo.grid(row=0, column=7, sticky=W, padx=4, pady=4)
+
 
         # Descubrimiento
         disc = ttk.LabelFrame(container, text="Descubrir hosts", padding=10)
@@ -404,6 +440,9 @@ class App:
             " • Cliente SSH en terminal\n\n"
             "Consejo: puedes usar solo Avahi si tus equipos publican _ssh._tcp o _sftp-ssh._tcp.\n"
         )
+        if not NETIFACES_AVAILABLE:
+            msg += "\n\nADVERTENCIA: El paquete 'netifaces' no está instalado.\n"
+            msg += "La detección automática de subredes está limitada. Instálalo con: pip install netifaces"
         messagebox.showinfo("Requisitos", msg)
 
     def show_about(self):
@@ -417,6 +456,7 @@ class App:
         parts.append(f"Avahi: {'✔' if which('avahi-browse') else '✖'}")
         parts.append(f"Dolphin: {'✔' if which('dolphin') else '✖'}")
         parts.append(f"SSH: {'✔' if which('ssh') else '✖'}")
+        parts.append(f"Net-Detect: {'✔' if NETIFACES_AVAILABLE else '✖'}")
         self.dep_badge.configure(text="  |  ".join(parts))
 
     def append_status(self, text):
@@ -474,14 +514,18 @@ class App:
 
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                # NOTA: Nmap y Avahi se ejecutan en paralelo.
+                # Si se seleccionan múltiples subredes para Nmap, se podrían paralelizar también,
+                # pero por ahora se escanea una subred a la vez para no saturar.
                 futures = []
                 if self.include_nmap.get():
                     subnet = self.subnet.get().strip()
-                    try:
-                        ipaddress.ip_network(subnet, strict=False)
-                        futures.append(executor.submit(self.backend.run_nmap, subnet))
-                    except ValueError:
-                        self.append_status("Subred inválida. Ejemplo: 192.168.1.0/24")
+                    if subnet:
+                        try:
+                            ipaddress.ip_network(subnet, strict=False)
+                            futures.append(executor.submit(self.backend.run_nmap, subnet))
+                        except ValueError:
+                            self.append_status(f"Subred '{subnet}' inválida. Use formato CIDR (ej: 192.168.1.0/24).")
 
                 if self.include_avahi.get():
                     futures.append(executor.submit(self.backend.run_avahi))
