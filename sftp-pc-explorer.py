@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Explorador SSH/SFTP para Dolphin
-Autor: ChatGPT
+Autor: andresgarcia0313@gmail.com
 Descripción:
   - Descubre hosts con SSH (puerto 22) usando Nmap (IPv4) y Avahi/mDNS (IPv4/IPv6).
   - Lista los resultados en una interfaz amigable (Tkinter).
